@@ -31,6 +31,7 @@ import { TlsSocketTransport } from './fcm/transport/TlsSocketTransport';
 import { FcmTransport } from './fcm/transport/FcmTransport';
 import { HwPushClient } from './push/HwPushClient';
 import { LocalNotifier } from './push/LocalNotifier';
+import { PushKitTokenProvider } from './push/PushKitTokenProvider';
 
 /** Bootstrap facade: credential + token management, service factories. */
 export class FirebaseApp {
@@ -205,5 +206,15 @@ export class FirebaseApp {
    */
   localNotifier(): LocalNotifier {
     return new LocalNotifier();
+  }
+
+  /**
+   * Client-side Push Kit token provider (@kit.PushKit `pushService.getToken()`).
+   * `registerDeviceToken(db, uid)` upserts `devicePushToken` into the user's
+   * Firestore profile so your server router can fan out sends — the `hw:` tag
+   * convention is documented in PROTOCOLS §12.
+   */
+  pushKitToken(): PushKitTokenProvider {
+    return new PushKitTokenProvider();
   }
 }

@@ -8,6 +8,7 @@ import { SseStream } from '../main/ets/common/SseStream';
 import { RealtimeDatabase } from '../main/ets/database/RealtimeDatabase';
 import { Firestore } from '../main/ets/firestore/Firestore';
 import { OAuthCredential } from '../main/ets/auth/OAuthCredential';
+import { PushKitTokenProvider } from '../main/ets/push/PushKitTokenProvider';
 
 export default function firebaseUnitTest() {
   describe('firebase-protobuf', () => {
@@ -69,6 +70,21 @@ export default function firebaseUnitTest() {
     });
     it('errorMessage', 0, () => {
       expect(Json.firebaseErrorMessage('{"error":{"message":"boom"}}')).assertEqual('boom');
+    });
+  });
+
+  describe('push-kit-router', () => {
+    it('hwTagConvention', 0, () => {
+      expect(PushKitTokenProvider.tag('abc123')).assertEqual('hw:abc123');
+      expect(PushKitTokenProvider.tag('hw:abc123')).assertEqual('hw:abc123');
+      expect(PushKitTokenProvider.untag('hw:abc123')).assertEqual('abc123');
+      expect(PushKitTokenProvider.untag('abc123')).assertEqual('abc123');
+      expect(PushKitTokenProvider.untag(PushKitTokenProvider.tag('abc123'))).assertEqual('abc123');
+    });
+    it('hwTokenRegistryField', 0, () => {
+      const wire: string = JSON.stringify(PushKitTokenProvider.profileFields('hw:abc123'));
+      expect(wire.indexOf('"devicePushToken"') >= 0).assertTrue();
+      expect(wire.indexOf('"stringValue":"hw:abc123"') >= 0).assertTrue();
     });
   });
 }

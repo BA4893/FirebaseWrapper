@@ -253,3 +253,117 @@ response 200, empty body
 ```
 Proxy side: upsert `(releaseId, fid)` keyed by the caller's auth subject; expose
 uptake counts to your own console.
+
+## 11. HarmonyOS Push Kit REST (`push/HwPushClient.ets`)
+
+The downstream replacement for FCM's MCS socket on HarmonyOS devices
+(APNs/iOS ↔ Push Kit/HarmonyOS). Endpoints (mirrored at
+`HwPushClient.ets` lines 32–33):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST https://oauth-login.cloud.huawei.com/oauth2/v3/token` | OAuth 2.0 access token |
+| `POST https://push-api.cloud.huawei.com/v1/{appId}/messages:send` | send one message |
+
+### 11.1 OAuth 2.0 client-credentials token
+
+```
+request  grant_type=client_credentials&client_id=<AGC AppId>&client_secret=<ClientSecret>
+         (content-type: application/x-www-form-urlencoded)
+response { "access_token": "...", "expires_in": 3600, "token_type": "Bearer" }
+```
+`HwPushClient.accessToken()` caches the token and proactively refreshes
+60 s before expiry; invalid credentials throw `AUTH` — no silent fallback.
+
+### 11.2 `POST /v1/{appId}/messages:send` — one device token per call
+
+```
+request  { "message": { "data": { "payload": "<opaque string>" },
+                        "android": { "urgency": "HIGH",
+                                     "notification": { "title": "...", "body": "..." } },
+                        "token": [ "<push kit token>" ] } }
+response { "requestId": "<...>" }
+```
+- `sendNotification(pushToken, title, body, extraData)` = the shape above
+  (notification block + HIGH urgency).
+- `sendDataMessage(pushToken, payload)` = data-only (silent); the app
+  process receives the payload and surfaces it via Notification Kit
+  (`LocalNotifier`). See §12.2 for why notification-type wins for
+  user-facing alerts while the app is killed.
+- `sendRaw(message)` = any server-shaped `{"message": {...}}` body.
+
+### 11.3 Server-side keep-the-secret rule
+
+`FirebaseApp.hwPush(appId, appSecret)` embeds the client secret in app
+config — **development/diagnostics only, never ship**. Production sends
+route through your server or Cloud Function, which holds
+`HUAWEI_CLIENT_SECRET` in its secret store and speaks §11.1/§11.2 itself —
+see §12 and `docs/proxy/cloud-function/index.js`.
+
+## 12. Multi-OS push router (`docs/proxy/cloud-function/index.js`)
+
+One Firebase project, mixed fleet (iOS/Android on FCM, HarmonyOS on Push
+Kit): one callable fans every send out to the right transport. Client half:
+`PushKitTokenProvider` (`FirebaseApp.pushKitToken()`). Server half: the
+reference Cloud Function at `docs/proxy/cloud-function/index.js`.
+
+### 12.1 `devicePushToken` registry convention
+
+Official iOS/Android SDKs upload the APNs/FCM token transparently; on
+HarmonyOS the app does it explicitly — `PushKitTokenProvider
+.registerDeviceToken(db, uid)` upserts the tagged token into the user's
+Firestore profile `users/{uid}.devicePushToken`. The stored value is
+transport-tagged and the router dispatches on the tag:
+
+| stored value | route |
+|---|---|
+| `hw:<push kit token>` | Huawei Push Kit REST (§11.2) |
+| any other non-empty string | FCM v1 `messages:send` (iOS/Android) |
+| empty / field absent | error — device never registered |
+
+`PushKitTokenProvider.tag()` applies the `hw:` prefix on-device; the
+router's `parseRoute()` strips and dispatches on it. Keep the two in sync —
+they are the single point where client and server meet.
+
+### 12.2 Notification vs. data delivery — the honest structural delta
+
+On iOS/Android a daemon-owned APNs/FCM socket delivers **both** notification
+and silent data messages while the app is killed. On HarmonyOS NEXT,
+notification messages surface the banner the same way (system push path),
+but **data (silent) messages require the app process** — a killed app never
+sees them until its next launch. Therefore:
+
+- User-facing alerts travel as notification-type messages
+  (`android.notification`, `urgency: HIGH`, `click_action.type: 1` with the
+  NEXT deep-link `intent` registered in the app's `module.json5`
+  `abilities[].skills[].uris`). Banner delivery while killed is then
+  equivalent to APNs/FCM.
+- Data-only sends (`HwPushClient.sendDataMessage`) target running apps (or
+  decorate on next launch), surfaced via Notification Kit (`LocalNotifier`).
+
+With the §12.1 registry the delivery UX is effectively equivalent; the
+router deliberately sends notification-type payloads for alerts and
+documents the silent-push difference rather than faking it.
+
+### 12.3 Callable contract
+
+```
+request  { uid, title, body, payload?, data?, clickIntent? }   (caller auth required)
+response { routed: "harmonyos" | "fcm", requestId? | messageId? }
+```
+Server side: reads `users/{uid}.devicePushToken`, dispatches per §12.1, and
+mirrors `HwPushClient`'s token caching (60 s proactive refresh) with one
+force-refresh retry on 401/403. Errors are `HttpsError` with typed codes
+(`not-found` = no registry entry, `unauthenticated`, `failed-precondition`
+= missing secrets).
+
+### 12.4 Security notes
+
+- `HUAWEI_CLIENT_SECRET` lives **only** in the Cloud Function's secret store
+  (`firebase functions:secrets:set HUAWEI_CLIENT_SECRET`); rotate it in the
+  AGC console.
+- The SDK's in-app `HwPushClient(appSecret)` path is **dev-only, never
+  ship** (§11.3) — it exists for diagnostics against the same wire contract.
+- The callable requires Firebase Auth; add custom-claim or App Check
+  authorization before fan-out — a signed-in caller can otherwise send to
+  any registered token in the project.

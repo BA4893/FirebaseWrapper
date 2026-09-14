@@ -56,6 +56,7 @@ export { TlsSocketTransport } from './fcm/transport/TlsSocketTransport';
 export { NapiBridgeTransport } from './fcm/transport/NapiBridgeTransport';
 export { HwPushClient } from './push/HwPushClient';
 export { LocalNotifier } from './push/LocalNotifier';
+export { PushKitTokenProvider } from './push/PushKitTokenProvider';
 export { FirestoreCache, CacheSource, FirestoreLike, FIRESTORE_CACHE_EVENT } from './firestore/FirestoreCache';
 export { ResumableChunkState } from './storage/FirebaseStorage';
 export { MfaPendingCredential } from './auth/FirebaseAuth';
