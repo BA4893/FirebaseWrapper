@@ -1,0 +1,19 @@
+{
+  "name": "@openharmony/firebase",
+  "version": "1.0.0",
+  "description": "Custom open-source Firebase client wrapper for OpenHarmony NEXT: FCM, In-App Messaging, Analytics, Crashlytics, Remote Config, App Check (HUKS), Auth, Firestore, RTDB.",
+  "main": "./src/main/ets/index.ets",
+  "author": "FirebaseWrapper contributors",
+  "license": "Apache-2.0",
+  "keywords": [
+    "firebase",
+    "fcm",
+    "remoteconfig",
+    "crashlytics",
+    "analytics",
+    "appcheck",
+    "huks",
+    "openharmony"
+  ],
+  "dependencies": {}
+}

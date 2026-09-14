@@ -1,0 +1,22 @@
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# local dev / agent debris (not part of the SDK)
+/.tmp-docs
+/.agents
+/.kiro
+/.commandcode
+/.tmp-*
+*.log
+tree.txt
+skills-lock.json
