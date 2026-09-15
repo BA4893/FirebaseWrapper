@@ -185,7 +185,42 @@ Universal Keystore Kit (HUKS):
   pure ArkTS; only `common/HttpTransport`, `common/CredentialStore`, and the FCM
   transports touch infrastructure APIs.
 
-## Security notes
+## Shim — Firebase Analytics/Crashlytics data-layer switch
+
+A **data-layer shim**, not a binary shim, is available in `firebase/src/main/ets/shim/`. It exists to let app code keep using the same Analytics/Crashlytics call sites while the SDK routes telemetry to a selected backend by compile-time/profile switch.
+
+### Current backends
+
+- `TelemetryBackend.Firebase` — delegates to the existing `AnalyticsApi` (GA4 Measurement Protocol) and `Crashlytics` (Firebase Crashlytics ingestion). This is the current production backend.
+- `TelemetryBackend.Huawei` — shell only. The Huawei analytics and crash backends are isolated in `HuaweiShimShell.ets` but are no-ops until their wire contracts are implemented against Huawei HiAppEvent / AGC documentation.
+
+### Switch
+
+`TelemetryShimConfig.backend` selects the backend for the whole app. In the demo app this is currently driven by `DemoConfig.TELEMETRY_BACKEND`. Set it to `'huawei'` to exercise the Huawei shell; set it to `'firebase'` to use the existing Firebase backend.
+
+### Interfaces
+
+- `AnalyticsShimBackend`
+- `CrashShimBackend`
+
+App-facing facades `AnalyticsShim` and `CrashShim` delegate to one backend selected by config. The shim normalizes call-site parameters and keeps the reporting surface stable.
+
+### Limitations (must remain explicit)
+
+1. **Analytics does not provide automatic lifecycle tracking.** Foreground/background, session start, screen_view, first_open, and similar events must be recorded explicitly by the app, or by a lifecycle helper layer built on top of the shim. The demo app currently records `lifecycle` events from `onForeground`/`onBackground` as a sample.
+2. **Crashlytics captures JS-level errors only.** There is no native signal/mach capture, no tombstone symbolication from Google's NDK pipeline, and no dSYM processing.
+3. **Binary shims do not apply here.** You cannot bridge Google's native SDK binaries on OpenHarmony and expect Analytics/Crashlytics to behave the same way. This shim is a translator/adapter at the data layer.
+
+### Adding a real Huawei backend
+
+Before shipping the Huawei backend:
+
+- confirm the current Huawei HiAppEvent / AGC event-reporting API contract from Huawei platform documentation,
+- confirm the Huawei crash/error-reporting endpoint and payload,
+- implement the adapters in `HuaweiShimShell.ets`,
+- remove the placeholder no-op behavior and wire the required Huawei identity/session/batching fields,
+- update this section with the implemented parity and deltas.
+
 
 - Firebase API keys are write-only shielding values; the ID token is what grants access.
 - Service-account private keys must **never** ship in this client package — the

@@ -31,9 +31,11 @@ export { Performance } from './perf/Performance';
 export { Trace } from './perf/Performance';
 export { ABTesting } from './abtesting/ABTesting';
 export { AILogic } from './ai/AILogic';
+export { BackendTiedAiFeature } from './ai/BackendTiedAiFeature';
 export { DataConnect } from './dataconnect/DataConnect';
 export { Sessions } from './sessions/Sessions';
 export { MLModelDownloader } from './ml/MLModelDownloader';
+export { BackendTiedModelService } from './ml/BackendTiedModelService';
 export { SecureStore } from './common/SecureStore';
 export { AppDistribution } from './dist/AppDistribution';
 export { DistRelease } from './dist/AppDistribution';
@@ -61,3 +63,10 @@ export { FirestoreCache, CacheSource, FirestoreLike, FIRESTORE_CACHE_EVENT } fro
 export { ResumableChunkState } from './storage/FirebaseStorage';
 export { MfaPendingCredential } from './auth/FirebaseAuth';
 export { NativeCrashBridge, CrashKey } from './crashlytics/NativeCrashBridge';
+export { TelemetryBackend, AnalyticsParam, CrashDetails as ShimCrashDetails, CrashKey as ShimCrashKey } from './shim/TelemetryBackend';
+export { TelemetryShimConfig } from './shim/ShimConfig';
+export { AnalyticsShim, ShimAnalyticsParam } from './shim/AnalyticsShim';
+export { CrashShim } from './shim/CrashShim';
+export { firebaseAnalyticsBackend, firebaseCrashBackend, analyticsShim, crashShim } from './shim/ShimFactory';
+export { HuaweiAnalyticsBackendAdapter, HuaweiCrashBackendAdapter } from './shim/HuaweiShimShell';
+

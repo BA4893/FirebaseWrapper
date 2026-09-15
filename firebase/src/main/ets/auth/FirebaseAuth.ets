@@ -65,11 +65,99 @@ export class FirebaseAuth {
     return this.consumeAuthEnvelope(envelope);
   }
 
+  // -----------------------------------------------------------------------
+  // Reauthentication
+  // -----------------------------------------------------------------------
+
   /**
-   * Starts a phone-number sign-in: sends the SMS code. Returns the
-   * `sessionInfo` to pass to {@link confirmPhoneCode}.
+   * Reauthenticates the current user with fresh credentials.
+   *
+   * Used before sensitive operations that require a recent login.
+   *
+   * TODO: confirm the exact server semantics once the Firebase Auth
+   * documentation is available:
+   *   - distinct reauth endpoint, or
+   *   - fresh credential sign-in that rebinds the current session
+   *
+   * For email/password this implementation currently reuses the existing
+   * sign-in path as a concrete placeholder until the confirmed semantics
+   * are known.
    */
-  async sendPhoneCode(phoneNumber: string, recaptchaToken: string): Promise<string> {
+  async reauthenticateWithCredential(credential: AuthCredential): Promise<AuthSession> {
+    if (credential instanceof EmailPasswordCredential) {
+      return this.reauthWithEmailPassword(credential);
+    }
+
+    if (credential instanceof OAuthCredential) {
+      return this.reauthWithOAuth(credential);
+    }
+
+    if (credential instanceof PhoneCredential) {
+      return this.reauthWithPhone(credential);
+    }
+
+    throw FirebaseException.auth('unsupported credential for reauthentication');
+  }
+
+  /**
+   * Reauth with email/password.
+   *
+   * TODO: confirm the exact server semantics and the accepted endpoint once
+   * the Firebase Auth documentation is available. This placeholder reuses
+   * the existing sign-in path until then.
+   */
+  private async reauthWithEmailPassword(
+    credential: EmailPasswordCredential
+  ): Promise<AuthSession> {
+    if (this.currentSession === undefined) {
+      throw FirebaseException.auth('no current session for reauthentication');
+    }
+
+    // TODO_CONFIRM_REAUTH_PATH: replace with the confirmed reauth endpoint or
+    // confirm that reusing signInWithPassword is acceptable for the target
+    // Firebase Auth semantics.
+    const endpoint: string = `${AUTH_BASE}/accounts:signInWithPassword?key=${this.apiKey}`;
+
+    const body: Object = {};
+    body['email'] = credential.email;
+    body['password'] = credential.password;
+    body['returnSecureToken'] = true;
+
+    const envelope = await this.transport.post(endpoint, JSON.stringify(body), [], '');
+    const session: AuthSession = this.consumeAuthEnvelope(envelope);
+
+    // TODO: confirm whether reauth should preserve the previous localId or
+    // whether session replacement is the correct behavior here.
+    return session;
+  }
+
+  /**
+   * Reauth with OAuth/provider credential.
+   *
+   * TODO: confirm supported provider credential shape and server path once
+   * the Firebase Auth documentation is available.
+   */
+  private async reauthWithOAuth(
+    credential: OAuthCredential
+  ): Promise<AuthSession> {
+    // TODO_CONFIRM_REAUTH_PATH
+    throw FirebaseException.auth('reauthentication with OAuth not implemented');
+  }
+
+  /**
+   * Reauth with phone credential.
+   *
+   * TODO: confirm how the SMS code is bound and whether this reuses the
+   * existing phone sign-in flow once the Firebase Auth documentation is
+   * available.
+   */
+  private async reauthWithPhone(
+    credential: PhoneCredential
+  ): Promise<AuthSession> {
+    // TODO_CONFIRM_REAUTH_PATH
+    throw FirebaseException.auth('reauthentication with phone not implemented');
+  }
+
     const body: Object = {};
     body['phoneNumber'] = phoneNumber;
     body['recaptchaToken'] = recaptchaToken;
@@ -96,6 +184,162 @@ export class FirebaseAuth {
     const envelope = await this.transport.post(`${AUTH_BASE}/accounts:signInWithPhoneNumber?key=${this.apiKey}`,
       JSON.stringify(body), [], '');
     return this.consumeAuthEnvelope(envelope);
+  }
+
+  // -----------------------------------------------------------------------
+  // Email-link sign-in
+  // -----------------------------------------------------------------------
+
+  /**
+   * Sends a Firebase email sign-in link to the given email address.
+   *
+   * The returned {@link EmailLinkDeliveryInfo} describes what the client
+   * must persist locally until the link is used.
+   *
+   * TODO: confirm the exact send endpoint and required fields once the
+   * Firebase Auth documentation is available.
+   */
+  async sendSignInLinkToEmail(
+    email: string,
+    actionUrl: string
+  ): Promise<EmailLinkDeliveryInfo> {
+    if (email.length === 0) {
+      throw FirebaseException.auth('email required for email-link sign-in');
+    }
+    if (actionUrl.length === 0) {
+      throw FirebaseException.auth('action URL required for email-link sign-in');
+    }
+
+    // TODO_CONFIRM_EMAIL_LINK_SEND_ENDPOINT
+    const endpoint: string = 'TODO_CONFIRM_EMAIL_LINK_SEND_ENDPOINT';
+
+    const body: Object = {};
+    body['email'] = email;
+    body['actionUrl'] = actionUrl;
+
+    const envelope = await this.transport.post(
+      `${endpoint}?key=${this.apiKey}`,
+      JSON.stringify(body),
+      [],
+      ''
+    );
+
+    if (!envelope.isOk()) {
+      throw FirebaseException.api(
+        'email-link send',
+        Json.firebaseErrorMessage(envelope.text)
+      );
+    }
+
+    // TODO: confirm the success response shape and whether it includes a
+    // sessionInfo / oob code that the client must persist.
+    const parsed: Object | undefined = Json.tryParse(envelope.text);
+    if (parsed === undefined) {
+      throw FirebaseException.api('email-link send', 'malformed response');
+    }
+
+    this.savePendingEmailLinkState({
+      email: email,
+      actionUrl: actionUrl,
+      storedAt: Date.now()
+    });
+
+    return new EmailLinkDeliveryInfo(email, true, parsed);
+  }
+
+  /**
+   * Completes email-link sign-in.
+   *
+   * {@code link} is the full sign-in link string received by the app.
+   * {@code email} must be the email the link was sent to.
+   *
+   * TODO: confirm the exact confirm endpoint and whether the server expects
+   * the full link, an extracted code/sessionInfo, or both once the Firebase
+   * Auth documentation is available.
+   */
+  async signInWithEmailLink(
+    link: string,
+    email: string
+  ): Promise<AuthSession> {
+    if (link.length === 0) {
+      throw FirebaseException.auth('sign-in link required');
+    }
+    if (email.length === 0) {
+      throw FirebaseException.auth('email required for email-link sign-in');
+    }
+
+    const pendingEmail: string | undefined = this.getPendingEmailLinkEmail();
+    if (pendingEmail !== undefined && pendingEmail !== email) {
+      throw FirebaseException.auth('email does not match pending link');
+    }
+
+    // TODO_CONFIRM_EMAIL_LINK_CONFIRM_ENDPOINT
+    const endpoint: string = 'TODO_CONFIRM_EMAIL_LINK_CONFIRM_ENDPOINT';
+
+    const body: Object = {};
+    body['link'] = link;
+    body['email'] = email;
+
+    const envelope = await this.transport.post(
+      `${endpoint}?key=${this.apiKey}`,
+      JSON.stringify(body),
+      [],
+      ''
+    );
+
+    if (!envelope.isOk()) {
+      const detail: string = Json.firebaseErrorMessage(envelope.text);
+      // TODO: distinguish expired/used link errors if the server returns them.
+      throw FirebaseException.api('email-link confirm', detail);
+    }
+
+    // TODO: confirm the success response shape.
+    // Expected to contain: idToken, refreshToken, expiresIn, localId, email, etc.
+    return this.consumeAuthEnvelope(envelope);
+  }
+
+  /**
+   * Returns the locally stored pending email for an email-link flow,
+   * if one exists.
+   */
+  getPendingEmailLinkEmail(): string | undefined {
+    const state: PendingEmailLinkState | undefined = this.takePendingEmailLinkState();
+    if (state === undefined) {
+      return undefined;
+    }
+    return state.email;
+  }
+
+  /**
+   * Clears any locally stored pending email-link state.
+   */
+  clearPendingEmailLink(): void {
+    this.clearPendingEmailLinkState();
+  }
+
+  /**
+   * Stores pending email-link state locally.
+   */
+  private savePendingEmailLinkState(state: PendingEmailLinkState): void {
+    // TODO: use the existing store/credentials path the SDK already has.
+    // Keep this lightweight; do not leak sensitive data.
+    (void)state;
+  }
+
+  /**
+   * Takes the pending email-link state out of storage so it can be consumed
+   * once by {@link signInWithEmailLink}.
+   */
+  private takePendingEmailLinkState(): PendingEmailLinkState | undefined {
+    // TODO: read + remove the state under PENDING_EMAIL_LINK_KEY.
+    return undefined;
+  }
+
+  /**
+   * Clears pending email-link state without consuming it.
+   */
+  private clearPendingEmailLinkState(): void {
+    // TODO: remove PENDING_EMAIL_LINK_KEY if present.
   }
 
   /**
@@ -428,18 +672,75 @@ export class AuthAccountInfo {
 }
 
 /**
- * Pending MFA challenge returned by Identity Toolkit (`MFA_REQUIRED`).
- * Pass to {@link FirebaseAuth.resolveMfaSignIn} with the SMS code.
+ * Email/password credential for reauthentication.
  */
-export class MfaPendingCredential {
-  pendingCredential: string;
-  enrollmentId: string;
-  /** Refresh token captured before the challenge, so the session survives finalize. */
-  refreshToken: string;
+export class EmailPasswordCredential {
+  readonly email: string;
+  readonly password: string;
 
-  constructor(pendingCredential: string, enrollmentId: string, refreshToken: string) {
-    this.pendingCredential = pendingCredential;
-    this.enrollmentId = enrollmentId;
-    this.refreshToken = refreshToken;
+  constructor(email: string, password: string) {
+    this.email = email;
+    this.password = password;
   }
 }
+
+/**
+ * Phone credential for reauthentication.
+ */
+export class PhoneCredential {
+  readonly sessionInfo: string;
+  readonly code: string;
+
+  constructor(sessionInfo: string, code: string) {
+    this.sessionInfo = sessionInfo;
+    this.code = code;
+  }
+}
+
+/**
+ * Credential union for reauthentication.
+ *
+ * New provider credential shapes should be added here as they are
+ * supported.
+ */
+export type AuthCredential =
+  | EmailPasswordCredential
+  | OAuthCredential
+  | PhoneCredential;
+
+/**
+ * Returned by {@link sendSignInLinkToEmail} so the app knows what to do next.
+ */
+export class EmailLinkDeliveryInfo {
+  readonly email: string;
+  readonly shouldOpenLink: boolean;
+  readonly parsedResponse: Object | undefined;
+
+  constructor(email: string, shouldOpenLink: boolean, parsedResponse: Object | undefined) {
+    this.email = email;
+    this.shouldOpenLink = shouldOpenLink;
+    this.parsedResponse = parsedResponse;
+  }
+}
+
+/**
+ * Internal pending state for the email-link flow.
+ */
+interface PendingEmailLinkState {
+  email: string;
+  actionUrl: string;
+  storedAt: number;
+}
+
+/**
+ * Persisted email-link pending state key.
+ */
+const PENDING_EMAIL_LINK_KEY: string = 'auth.emailLink.pending';
+
+/**
+ * TTL for pending email-link state.
+ *
+ * TODO: confirm whether Firebase imposes a specific link lifetime that
+ * should cap local pending state.
+ */
+const PENDING_EMAIL_LINK_TTL_MS: number = 1000 * 60 * 60 * 24;
