@@ -57,8 +57,8 @@ publishing the package to the OHPM registry.
 | Firebase product | iOS module | Android module | Here | State in this SDK |
 |---|---|---|---|---|
 | Auth | `FirebaseAuth` | `firebase-auth` | `auth/` | email/password, anonymous, phone (code+confirm), custom token, OAuth (Google/Apple) + link, password reset, delete, `onAuthStateChanged`; refresh token HUKS-sealed, MFA (enroll + sign-in challenge). No email-link sign-in / reauthenticate yet |
-| Firestore | `FirebaseFirestore` | `firebase-firestore` | `firestore/` | CRUD, structured `runQuery`, `listen()` (SSE long-poll), `cachedGet` offline fallback, `WriteBatch` / `runTransaction` as **read-modify-write helpers, not atomic** (proxy commit for atomicity) |
-| Realtime Database | `FirebaseDatabase` | `firebase-database` | `database/` | REST CRUD, `onValue()` SSE watcher, `transaction()` helper, `onDisconnect` via proxy (falls back to immediate write) |
+| Firestore | `FirebaseFirestore` | `firebase-firestore` | `firestore/` | CRUD, structured `runQuery`, `listen()` (SSE long-poll), `cachedGet` offline fallback, `WriteBatch` / `runTransaction` **server-atomic** via `:beginTransaction` / `:commit` with retry (PROTOCOLS §7) |
+| Realtime Database | `FirebaseDatabase` | `firebase-database` | `database/` | REST CRUD, `onValue()` SSE watcher, `transaction()` **compare-and-set** via ETag `If-Match` / 412 retry (per-node; multi-location stays best-effort), `onDisconnect` via proxy (falls back to immediate write) |
 | Cloud Messaging | `FirebaseMessaging` | `firebase-messaging` | `fcm/` | registration tokens **only via proxy** (`/v1/installations:register` — no local stubs), topics, upstream relay; downstream = community-documented MCS TLS socket (native bridge optional). No APNs on this platform |
 | Push router (multi-OS) | — | — | `push/` + `docs/proxy/cloud-function/` | Cloud Function callable fans a mixed fleet out on one Firebase project: `hw:`-tagged Push Kit tokens → Huawei Push Kit REST, others → FCM v1. Token registry via `PushKitTokenProvider` (`devicePushToken` in `users/{uid}`); notification-type payloads for killed-app banner delivery. Contract: `docs/PROTOCOLS.md` §12 |
 | In-App Messaging | `FirebaseInAppMessaging` | `firebase-inappmessaging` | `messaging/` | trigger/campaign fetch against **your backend** (Firebase IAM delivery doesn't serve OHOS clients) |
@@ -90,9 +90,10 @@ Deeper API-name parity should not be read as behavioural parity. The following
 are deliberate, documented downgrades — each throws or labels itself rather
 than faking success:
 
-1. **Firestore/RTDB transactions are not server-atomic.** A single REST client
-   cannot run compare-and-set; they are read-modify-write helpers. Route
-   commits through your proxy for true atomicity.
+1. **RTDB transactions are per-node compare-and-set.** Firestore transactions are
+   server-atomic (`:beginTransaction`/`:commit`), but RTDB ETags apply per node —
+   a transaction spanning multiple RTDB locations remains read-modify-write
+   (PROTOCOLS §8).
 2. **FCM registration tokens require the proxy** (`docs/PROTOCOLS.md` §9.1).
    Without it the call throws — no `fid:` pseudo-tokens.
 3. **RTDB `onDisconnect` needs the proxy** (§9.3) to hold the op server-side;

@@ -37,6 +37,46 @@ export class Firestore {
     return this.cache !== undefined;
   }
 
+  /**
+   * Server-atomic write: `POST …:commit` with a `writes[]` envelope
+   * (PROTOCOLS §7). Firestore REST v1 applies every write all-or-nothing —
+   * pass a `transaction` token (from `:beginTransaction`) for transactions, or
+   * a single write for batched updates.
+   */
+  async commitWrites(writes: Array<Object>, transaction: string = ''): Promise<Object> {
+    const body: Record<string, Object> = {};
+    body['writes'] = writes;
+    if (transaction.length > 0) {
+      body['transaction'] = transaction;
+    }
+    const e = await this.transport.post(`${this.base()}:commit`,
+      JSON.stringify(body), await this.extra(), await this.bearer());
+    if (!e.isOk()) {
+      throw FirebaseException.api('firestore.commit', Json.firebaseErrorMessage(e.text));
+    }
+    return Firestore.need(e.text, 'firestore.commit');
+  }
+
+  /**
+   * Opens a server-side transaction; returns the opaque transaction token for
+   * `commitWrites(writes, token)`. Firestore rolls the transaction back if the
+   * token is never committed.
+   */
+  async beginTransaction(): Promise<string> {
+    const rw: Record<string, Object> = {};
+    const opts: Record<string, Object> = {};
+    opts['readWrite'] = rw;
+    const body: Record<string, Object> = {};
+    body['options'] = opts;
+    const e = await this.transport.post(`${this.base()}:beginTransaction`,
+      JSON.stringify(body), await this.extra(), await this.bearer());
+    if (!e.isOk()) {
+      throw FirebaseException.api('firestore.beginTransaction', Json.firebaseErrorMessage(e.text));
+    }
+    const p: Object = Firestore.need(e.text, 'firestore.beginTransaction');
+    return Json.string(p, 'transaction', '');
+  }
+
   /** Read-through: cache first (CACHE source), then network (NETWORK source). */
   async getDocumentCached(path: string): Promise<Object> {
     if (this.cache === undefined) {
@@ -227,12 +267,28 @@ export class Firestore {
     return new WriteBatch(this);
   }
 
-  /** Transaction: read-modify-write with retry. */
+  /**
+   * Full document resource name for `:commit` write envelopes:
+   * `projects/{p}/databases/(default)/documents/{path}`.
+   */
+  docName(path: string): string {
+    return `${this.base()}/${this.trim(path)}`;
+  }
+
+  /**
+   * Server-atomic transaction (PROTOCOLS §7): `:beginTransaction` → staged
+   * reads and writes → ONE `:commit` bound to the transaction token. Firestore
+   * applies all writes or none; concurrent writers abort the commit, which is
+   * retried with a fresh token up to `maxRetries` times — the same contract as
+   * the official SDKs' `runTransaction`.
+   */
   async runTransaction(update: firestoreTx, maxRetries: number = 8): Promise<void> {
     let tries: number = 0;
     while (true) {
       const tx: FirestoreTransaction = new FirestoreTransaction(this);
       try {
+        const token: string = await this.beginTransaction();
+        tx.useTransaction(token);
         await update(tx);
         await tx.commit();
         return;
@@ -244,12 +300,6 @@ export class Firestore {
       }
     }
   }
-
-  /**
-   * READ-MODIFY-WRITE helper (NOT an atomic transaction). Single REST client
-   * cannot provide Firestore's server-side atomicity; concurrent writers may
-   * interleave. Use a proxy-held commit endpoint for true atomicity.
-   */
 
   /** Network failures are replayable offline; server rejections are not. */
   private static isNetworkError(err: Object): boolean {
@@ -317,67 +367,111 @@ export type firestoreTokenProvider = () => Promise<string>;
 export type firestoreWatcher = (snapshot: Object) => void;
 export type firestoreErrorSink = (error: Error) => void;
 
-/** Queued write for WriteBatch. */
-class BatchOp {
+/** One staged write, rendered to a Firestore REST v1 `:commit` write envelope. */
+export class WriteOp {
   kind: string;
   path: string;
   fields: Object;
+  mask: Array<string>;
 
-  constructor(kind: string, path: string, fields: Object) {
+  constructor(kind: string, path: string, fields: Object, mask: Array<string>) {
     this.kind = kind;
     this.path = path;
     this.fields = fields;
+    this.mask = mask;
+  }
+
+  /**
+   * Wire envelope per https://cloud.google.com/firestore/docs/reference/rest/v1/Write:
+   * update/updateMask/delete carry the full `projects/.../documents/{path}` name.
+   */
+  toEnvelope(db: Firestore): Object {
+    const name: string = db.docName(this.path);
+    const env: Record<string, Object> = {};
+    if (this.kind === 'set' || this.kind === 'update') {
+      const upd: Record<string, Object> = {};
+      upd['name'] = name;
+      upd['fields'] = this.fields;
+      env['update'] = upd;
+      if (this.kind === 'update') {
+        const m: Record<string, Object> = {};
+        const paths: Array<string> = new Array<string>();
+        for (let i: number = 0; i < this.mask.length; i++) {
+          paths.push(this.mask[i]);
+        }
+        m['fieldPaths'] = paths;
+        env['updateMask'] = m;
+      }
+    } else {
+      env['delete'] = name;
+    }
+    return env;
   }
 }
 
-/** Sequential write batch (set/update/delete). */
+/** Atomic write batch (set/update/delete) — one server-side `:commit`. */
 export class WriteBatch {
   private db: Firestore;
-  private ops: Array<BatchOp>;
+  private ops: Array<WriteOp>;
 
   constructor(db: Firestore) {
     this.db = db;
-    this.ops = new Array<BatchOp>();
+    this.ops = new Array<WriteOp>();
   }
 
   set(path: string, fields: Object): WriteBatch {
-    this.ops.push(new BatchOp('set', path, fields));
+    this.ops.push(new WriteOp('set', path, fields, new Array<string>()));
     return this;
   }
 
   update(path: string, fields: Object): WriteBatch {
-    this.ops.push(new BatchOp('update', path, fields));
+    return this.updateMasked(path, fields, new Array<string>());
+  }
+
+  /** `update` restricted to `fieldPaths`; omitted fields are left untouched. */
+  updateMasked(path: string, fields: Object, mask: Array<string>): WriteBatch {
+    this.ops.push(new WriteOp('update', path, fields, mask));
     return this;
   }
 
   remove(path: string): WriteBatch {
-    this.ops.push(new BatchOp('remove', path, {}));
+    const none: Record<string, Object> = {};
+    this.ops.push(new WriteOp('remove', path, none, new Array<string>()));
     return this;
   }
 
+  /** Writes pending since the last commit — offline replay targets. */
+  pendingOps(): Array<WriteOp> {
+    return this.ops;
+  }
+
+  /**
+   * ONE `POST …documents:commit` — Firestore applies every write all-or-nothing.
+   * No longer a sequential loop of independent REST calls.
+   */
   async commit(): Promise<void> {
-    for (let i: number = 0; i < this.ops.length; i++) {
-      const op: BatchOp = this.ops[i];
-      if (op.kind === 'set') {
-        await this.db.createDocument(Firestore.parentOf(op.path), Firestore.docIdOf(op.path), op.fields);
-      } else if (op.kind === 'update') {
-        await this.db.updateDocument(op.path, op.fields, new Array<string>());
-      } else {
-        await this.db.deleteDocument(op.path);
-      }
+    if (this.ops.length === 0) {
+      return;
     }
+    const writes: Array<Object> = new Array<Object>();
+    for (let i: number = 0; i < this.ops.length; i++) {
+      writes.push(this.ops[i].toEnvelope(this.db));
+    }
+    await this.db.commitWrites(writes);
     this.ops.splice(0, this.ops.length);
   }
 }
 
-/** Transaction context: staged reads + writes, committed sequentially. */
+/** Transaction: begin → staged reads + writes → ONE atomic commit, with retry. */
 export class FirestoreTransaction {
   private db: Firestore;
-  private writes: Array<BatchOp>;
+  private writes: Array<WriteOp>;
+  private transaction: string;
 
   constructor(db: Firestore) {
     this.db = db;
-    this.writes = new Array<BatchOp>();
+    this.writes = new Array<WriteOp>();
+    this.transaction = '';
   }
 
   async get(path: string): Promise<Object> {
@@ -385,28 +479,51 @@ export class FirestoreTransaction {
   }
 
   set(path: string, fields: Object): void {
-    this.writes.push(new BatchOp('set', path, fields));
+    this.writes.push(new WriteOp('set', path, fields, new Array<string>()));
   }
 
   update(path: string, fields: Object): void {
-    this.writes.push(new BatchOp('update', path, fields));
+    this.writes.push(new WriteOp('update', path, fields, new Array<string>()));
+  }
+
+  /** Masked update — only `fieldPaths` are applied server-side. */
+  updateMasked(path: string, fields: Object, mask: Array<string>): void {
+    this.writes.push(new WriteOp('update', path, fields, mask));
   }
 
   remove(path: string): void {
-    this.writes.push(new BatchOp('remove', path, {}));
+    const none: Record<string, Object> = {};
+    this.writes.push(new WriteOp('remove', path, none, new Array<string>()));
   }
 
+  /** Writes pending since the last begin/commit — offline replay targets. */
+  pendingOps(): Array<WriteOp> {
+    return this.writes;
+  }
+
+  /** Binds the commit to a server-side transaction token from `beginTransaction`. */
+  useTransaction(token: string): void {
+    this.transaction = token;
+  }
+
+  transactionToken(): string {
+    return this.transaction;
+  }
+
+  /**
+   * Atomic commit: staged writes ride the bound `:beginTransaction` token, so
+   * Firestore either applies every write or none of them.
+   */
   async commit(): Promise<void> {
-    for (let i: number = 0; i < this.writes.length; i++) {
-      const op: BatchOp = this.writes[i];
-      if (op.kind === 'set') {
-        await this.db.createDocument(Firestore.parentOf(op.path), Firestore.docIdOf(op.path), op.fields);
-      } else if (op.kind === 'update') {
-        await this.db.updateDocument(op.path, op.fields, new Array<string>());
-      } else {
-        await this.db.deleteDocument(op.path);
-      }
+    if (this.writes.length === 0) {
+      return;
     }
+    const writes: Array<Object> = new Array<Object>();
+    for (let i: number = 0; i < this.writes.length; i++) {
+      writes.push(this.writes[i].toEnvelope(this.db));
+    }
+    await this.db.commitWrites(writes, this.transaction);
+    this.writes.splice(0, this.writes.length);
   }
 }
 

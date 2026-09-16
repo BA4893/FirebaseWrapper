@@ -20,3 +20,8 @@
 *.log
 tree.txt
 skills-lock.json
+
+# hvigor-generated per-module build profile (regenerated on build)
+/firebase/BuildProfile.ets
+# generated dependency lock (refreshed by ohpm install)
+/entry/oh-package-lock.json5

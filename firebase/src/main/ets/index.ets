@@ -21,7 +21,7 @@ export { AuthAccountInfo } from './auth/FirebaseAuth';
 export { OAuthCredential } from './auth/OAuthCredential';
 export { AuthSubscription } from './auth/OAuthCredential';
 export { Firestore } from './firestore/Firestore';
-export { WriteBatch } from './firestore/Firestore';
+export { WriteOp, WriteBatch } from './firestore/Firestore';
 export { FirestoreTransaction } from './firestore/Firestore';
 export { RealtimeDatabase } from './database/RealtimeDatabase';
 export { FirebaseStorage } from './storage/FirebaseStorage';

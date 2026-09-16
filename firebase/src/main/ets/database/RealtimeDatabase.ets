@@ -129,25 +129,49 @@ export class RealtimeDatabase {
     return `${this.dbUrl}/${p}.json`;
   }
 
-  /** Transaction: read-modify-write HELPER (not server-atomic). */
+  /**
+   * TRUE compare-and-set transaction (PROTOCOLS §8) via the documented RTDB
+   * ETag mechanism: `GET` with `X-Firebase-ETag: true` returns the node's
+   * current value AND its ETag; `PUT` with `If-Match: <etag>` succeeds only if
+   * the node is unchanged — otherwise RTDB replies `412 Precondition Failed`
+   * and the read-compute-write loop retries (up to `maxRetries`), so concurrent
+   * writers can no longer silently interleave.
+   *
+   * Returning `undefined` from `update` deletes the node (If-Match DELETE is
+   * not used because RTDB's documented conditional-delete support is via PUT
+   * with null). Note: ETags are per-node — a transaction spanning multiple
+   * locations is still read-modify-write per node (documented limitation).
+   */
   async transaction(path: string, update: rtdbTransaction,
     maxRetries: number = 8): Promise<Object | undefined> {
     let tries: number = 0;
     while (true) {
-      const current: Object | undefined = await this.get(path);
-      const next: Object | undefined = update(current);
-      if (next === undefined) {
-        await this.remove(path);
-        return undefined;
+      const headers: Array<HeaderPair> = new Array<HeaderPair>();
+      headers.push(new HeaderPair('X-Firebase-ETag', 'true'));
+      const read = await this.transport.get(this.url(path, await this.tokenSuffix()), headers, '');
+      if (!read.isOk()) {
+        throw FirebaseException.api('rtdb.tx.read', Json.firebaseErrorMessage(read.text));
       }
-      try {
-        await this.set(path, next);
+      const etag: string = read.headerValue('ETag');
+      const current: Object | undefined = (read.text === 'null' || read.text.length === 0)
+        ? undefined
+        : Json.tryParse(read.text);
+      const next: Object | undefined = update(current);
+      const putHeaders: Array<HeaderPair> = new Array<HeaderPair>();
+      if (etag.length > 0) {
+        putHeaders.push(new HeaderPair('If-Match', etag));
+      }
+      const body: string = next === undefined ? 'null' : JSON.stringify(next);
+      const put = await this.transport.put(this.url(path, await this.tokenSuffix()), body, putHeaders, '');
+      if (put.isOk()) {
         return next;
-      } catch (err) {
-        tries++;
-        if (tries >= maxRetries) {
-          throw err;
-        }
+      }
+      if (put.status !== 412) {
+        throw FirebaseException.api('rtdb.tx.commit', Json.firebaseErrorMessage(put.text));
+      }
+      tries++;
+      if (tries >= maxRetries) {
+        throw FirebaseException.api('rtdb.tx.conflict', 'too many concurrent modifications');
       }
     }
   }

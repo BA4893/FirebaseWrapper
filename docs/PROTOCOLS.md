@@ -106,11 +106,32 @@ Batch flush at 750 events or 10 s idle, whichever comes first.
 with `Authorization: Bearer <idToken>` and optional `X-Firebase-AppCheck`. Methods:
 GET / POST (create) / PATCH (update) / DELETE; `:runQuery` for structured queries.
 
+**Atomic writes & transactions (used by `WriteBatch.commit()` /
+`runTransaction()`):**
+
+- `POST …/documents:beginTransaction` with body
+  `{"options":{"readWrite":{}}}` → `{ "transaction": "<token>" }`.
+- `POST …/documents:commit` with body
+  `{"writes":[…], "transaction":"<token>"}` — each write is a
+  [Write](https://cloud.google.com/firestore/docs/reference/rest/v1/Write)
+  envelope: `{"update":{"name":"projects/…/documents/{path}","fields":{…}},
+  "updateMask":{"fieldPaths":[…]}}` or `{"delete":"projects/…/documents/{path}"}`.
+  Firestore applies the whole batch **all-or-nothing**; concurrent writers
+  abort the commit (`ABORTED`), which `runTransaction` retries with a fresh
+  token.
+
 ## 8. RTDB REST
 
 `https://{database}.firebaseio.com/*.json?auth=<idToken>` — GET / PUT / POST / PATCH /
 DELETE; realtime via a shallow long-poll SSE watcher (`accept: text/event-stream`,
 `readTimeout` ≈ 55 s, re-arm loop).
+
+**Compare-and-set transactions (used by `RealtimeDatabase.transaction()`):**
+`GET` with `X-Firebase-ETag: true` returns the node value plus an `ETag`
+response header; `PUT` with `If-Match: <etag>` is applied only when the node is
+unchanged — RTDB replies **412 Precondition Failed** otherwise, and the client
+re-reads and retries. ETags are per-node, so multi-location transactions remain
+read-modify-write per node (documented limitation).
 
 ## 9. Custom Firebase Proxy
 
